@@ -149,12 +149,12 @@ int8_t I2Cdev::readWord(uint8_t devAddr, uint8_t regAddr, uint16_t *data, uint32
  * @return Number of bytes read (-1 indicates failure)
  */
 int8_t I2Cdev::readBytes(uint8_t devAddr, uint8_t regAddr, uint8_t length, uint8_t *data, uint32_t timeout) {
-    uint8_t count = 0;
+    auto rc = i2c_dma_write_read(i2c_dma, devAddr, &regAddr, 1, data, length);
+    if (rc != PICO_OK) {
+        return -1;
+    }
 
-    i2c_write_blocking(i2c1, devAddr, &regAddr, 1, true);
-    count = i2c_read_timeout_us(i2c1, devAddr, data, length, false, timeout * 1000);
-
-    return count;
+    return length;
 }
 
 /** Read multiple words from a 16-bit device register.
@@ -169,13 +169,15 @@ int8_t I2Cdev::readWords(uint8_t devAddr, uint8_t regAddr, uint8_t length, uint1
     uint8_t count = 0;
     uint8_t data_buf[length*2];
 
-    i2c_write_blocking(i2c1, devAddr, &regAddr, 1, true);
-    count = i2c_read_timeout_us(i2c1, devAddr, data_buf, length*2, false, timeout * 1000);
+    auto rc = i2c_dma_write_read(i2c_dma, devAddr, &regAddr, 1, data_buf, length*2);
+    if (rc != PICO_OK) {
+        return -1;
+    }
+
     for(int i=0; i<length; i++){
         data[i] = (data_buf[i*2] << 8) | data_buf[(i*2)+1];
     }
-
-    return count;
+    return length;
 }
 
 /** write a single bit in an 8-bit device register.
@@ -299,9 +301,9 @@ bool I2Cdev::writeBytes(uint8_t devAddr, uint8_t regAddr, uint8_t length, uint8_
     for(int i=0; i<length; i++){
         data_buf[i+1] = data[i];
     }
-    status = i2c_write_blocking(i2c1, devAddr, data_buf, length + 1, false);
+    auto rc = i2c_dma_write(i2c_dma, devAddr, data_buf, length + 1);
 
-    return status;
+    return (rc == PICO_OK);
 }
 
 /** Write multiple words to a 16-bit device register.
@@ -321,12 +323,15 @@ bool I2Cdev::writeWords(uint8_t devAddr, uint8_t regAddr, uint8_t length, uint16
         data_buf[j+1] = data[i];
         j += 2;
     }
-    status = i2c_write_blocking(i2c1, devAddr, data_buf, new_len, false);
+    auto rc = i2c_dma_write(i2c_dma, devAddr, data_buf, new_len);
 
-    return status;
+    return (rc == PICO_OK);
 }
 
 /** Default timeout value for read operations.
  * Set this to 0 to disable timeout detection.
  */
 uint32_t I2Cdev::readTimeout = I2CDEV_DEFAULT_READ_TIMEOUT;
+
+/** Handle to the dma i2c instance */
+i2c_dma_t* I2Cdev::i2c_dma;

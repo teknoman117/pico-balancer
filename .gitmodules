@@ -1,3 +1,6 @@
 [submodule "dependencies/FreeRTOS-Kernel"]
 	path = dependencies/FreeRTOS-Kernel
 	url = https://github.com/FreeRTOS/FreeRTOS-Kernel
+[submodule "dependencies/pico-i2c-dma"]
+	path = dependencies/pico-i2c-dma
+	url = https://github.com/fivdi/pico-i2c-dma

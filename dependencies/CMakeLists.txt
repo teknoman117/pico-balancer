@@ -11,5 +11,8 @@ else()
     endif()
 endif()
 
+# Add dma i2c library
+add_subdirectory(pico-i2c-dma)
+
 # Add i2cdevlib sources
 add_subdirectory(i2cdevlib)

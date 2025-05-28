@@ -26,6 +26,14 @@
 #define SDA_PIN 10
 #define SCL_PIN 11
 
+#define MOTOR_LEFT_PWM 16
+#define MOTOR_LEFT_A 18
+#define MOTOR_LEFT_B 17
+
+#define MOTOR_RIGHT_PWM 21
+#define MOTOR_RIGHT_A 20
+#define MOTOR_RIGHT_B 19
+
 union vec3 {
     struct {
         float z;
@@ -57,6 +65,13 @@ void imu_irq_handler(void) {
 
 void imu_task(void *queue_) {
     QueueHandle_t queue = static_cast<QueueHandle_t>(queue_);
+
+    // initialize I2C1 bus for the MPU6050
+    auto rc = i2c_dma_init(&I2Cdev::i2c_dma, i2c1, 400 * 1000, SDA_PIN, SCL_PIN);
+    if (rc != PICO_OK) {
+        printf("failed to initialize I2C\n");
+        vTaskDelete(NULL);
+    }
 
     // mpu initialization
     MPU6050 mpu;
@@ -191,13 +206,6 @@ void main_task(__unused void *params) {
 int main(void)
 {
     stdio_init_all();
-
-    // initialize I2C1 bus for the MPU6050
-    i2c_init(i2c1, 400 * 1000);
-    gpio_set_function(SDA_PIN, GPIO_FUNC_I2C);
-    gpio_set_function(SCL_PIN, GPIO_FUNC_I2C);
-    gpio_pull_up(SDA_PIN);
-    gpio_pull_up(SCL_PIN);
 
     // subscribe to imu interrupt
     gpio_init(INT_PIN);
