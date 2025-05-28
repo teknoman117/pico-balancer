@@ -1,0 +1,15 @@
+cmake_minimum_required(VERSION 3.13)
+
+# Add the correct FreeRTOS Kernel for our platform
+if(PICO_PLATFORM STREQUAL "rp2040")
+    add_subdirectory(FreeRTOS-Kernel/portable/ThirdParty/GCC/RP2040)
+else()
+    if (PICO_PLATFORM STREQUAL "rp2350-riscv")
+        add_subdirectory(FreeRTOS-Kernel/portable/ThirdParty/Community-Supported-Ports/GCC/RP2350_RISC-V)
+    else()
+        add_subdirectory(FreeRTOS-Kernel/portable/ThirdParty/Community-Supported-Ports/GCC/RP2350_ARM_NTZ)
+    endif()
+endif()
+
+# Add i2cdevlib sources
+add_subdirectory(i2cdevlib)
