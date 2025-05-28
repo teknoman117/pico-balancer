@@ -2,7 +2,7 @@
 
 #include "pico/cyw43_arch.h"
 #include "pico/stdlib.h"
-#include "hardware/i2c.h"
+#include "hardware/pwm.h"
 
 #include "lwip/ip4_addr.h"
 #include "lwip/dns.h"
@@ -34,6 +34,8 @@
 #define MOTOR_RIGHT_A 20
 #define MOTOR_RIGHT_B 19
 
+#define MOTOR_PWM_WRAP 5000
+
 union vec3 {
     struct {
         float z;
@@ -47,6 +49,9 @@ union vec3 {
     };
     float d[3];
 };
+
+void set_motor_left_speed(int16_t speed);
+void set_motor_right_speed(int16_t speed);
 
 SemaphoreHandle_t imuSem = nullptr;
 
@@ -178,6 +183,12 @@ void main_task(__unused void *params) {
     }
     printf("\nIP: %s, hostname: %s.local\n", ip4addr_ntoa(netif_ip4_addr(netif_list)), hostname);
 
+    // set motors according to tilt
+    const float Kp = 1.f / 5.f;
+    const float Ki = 0.025f;
+    const float Kd = 1.0f;
+    float previous_error = NAN;
+    float sum_error = 0.f;
     while (true) {
         // receive next orientation
         vec3 orientation;
@@ -185,10 +196,24 @@ void main_task(__unused void *params) {
             continue;
         }
 
+        // input error
+        float error = orientation.pitch - 3.0;
+        if (isnan(previous_error)) {
+            previous_error = error;
+        }
+        sum_error += error;
+
+        float response = (Kp * error) + (Ki * sum_error) + (Kd * (error - previous_error));
+        response *= (float) MOTOR_PWM_WRAP;
+        set_motor_left_speed((int16_t) response);
+        set_motor_right_speed((int16_t) response);
+
+        previous_error = error;
+
         // send orientation
         char msg[64] = {0};
-        int len = snprintf(msg, sizeof msg, "ypr: %f,\t %f,\t %f\n", orientation.yaw,
-                orientation.pitch, orientation.roll);
+        int len = snprintf(msg, sizeof msg, "ypr: %f,\t %f,\t %f, response: %f\n", orientation.yaw,
+                orientation.pitch, orientation.roll, response);
         res = send(sock, msg, len, 0);
         if (res < 0) {
             printf("send encountered an error = %d\n", res);
@@ -203,23 +228,89 @@ void main_task(__unused void *params) {
     vTaskDelete(NULL);
 }
 
-int main(void)
-{
-    stdio_init_all();
-
+void setup_imu_interrupt() {
     // subscribe to imu interrupt
     gpio_init(INT_PIN);
     gpio_set_input_enabled(INT_PIN, true);
     gpio_pull_up(INT_PIN);
     gpio_add_raw_irq_handler(INT_PIN, imu_irq_handler);
     gpio_set_irq_enabled(INT_PIN, GPIO_IRQ_EDGE_FALL, true);
+}
 
-    /* for now, wait for the usb connection */
-    //while (!stdio_usb_connected()) {
-    //    tight_loop_contents();
-    //}
+void setup_motors() {
+    // set up the motor GPIOs and PWM
+    gpio_init(MOTOR_LEFT_A);
+    gpio_set_dir(MOTOR_LEFT_A, GPIO_OUT);
+    gpio_put(MOTOR_LEFT_A, false);
 
-    sleep_ms(1000);
+    gpio_init(MOTOR_LEFT_B);
+    gpio_set_dir(MOTOR_LEFT_B, GPIO_OUT);
+    gpio_put(MOTOR_LEFT_B, false);
+
+    gpio_init(MOTOR_RIGHT_A);
+    gpio_set_dir(MOTOR_RIGHT_A, GPIO_OUT);
+    gpio_put(MOTOR_RIGHT_A, false);
+
+    gpio_init(MOTOR_RIGHT_B);
+    gpio_set_dir(MOTOR_RIGHT_B, GPIO_OUT);
+    gpio_put(MOTOR_RIGHT_B, false);
+
+    gpio_set_function(MOTOR_LEFT_PWM, GPIO_FUNC_PWM);
+    pwm_set_wrap(pwm_gpio_to_slice_num(MOTOR_LEFT_PWM), MOTOR_PWM_WRAP);
+    pwm_set_enabled(pwm_gpio_to_slice_num(MOTOR_LEFT_PWM), true);
+
+    gpio_set_function(MOTOR_RIGHT_PWM, GPIO_FUNC_PWM);
+    pwm_set_wrap(pwm_gpio_to_slice_num(MOTOR_RIGHT_PWM), MOTOR_PWM_WRAP);
+    pwm_set_enabled(pwm_gpio_to_slice_num(MOTOR_RIGHT_PWM), true);
+}
+
+void set_motor_left_speed(int16_t speed) {
+    if (speed > 5000) {
+        speed = 5000;
+    } else if (speed < -5000) {
+        speed = -5000;
+    }
+
+    if (speed > 0) {
+        gpio_put(MOTOR_LEFT_A, false);
+        gpio_put(MOTOR_LEFT_B, true);
+        pwm_set_gpio_level(MOTOR_LEFT_PWM, speed);
+    } else if (speed < 0) {
+        gpio_put(MOTOR_LEFT_A, true);
+        gpio_put(MOTOR_LEFT_B, false);
+        pwm_set_gpio_level(MOTOR_LEFT_PWM, -speed);
+    } else {
+        gpio_put(MOTOR_LEFT_A, false);
+        gpio_put(MOTOR_LEFT_B, false);
+    }
+}
+
+void set_motor_right_speed(int16_t speed) {
+    if (speed > 5000) {
+        speed = 5000;
+    } else if (speed < -5000) {
+        speed = -5000;
+    }
+
+    if (speed > 0) {
+        gpio_put(MOTOR_RIGHT_A, true);
+        gpio_put(MOTOR_RIGHT_B, false);
+        pwm_set_gpio_level(MOTOR_RIGHT_PWM, speed);
+    } else if (speed < 0) {
+        gpio_put(MOTOR_RIGHT_A, false);
+        gpio_put(MOTOR_RIGHT_B, true);
+        pwm_set_gpio_level(MOTOR_RIGHT_PWM, -speed);
+    } else {
+        gpio_put(MOTOR_RIGHT_A, false);
+        gpio_put(MOTOR_RIGHT_B, false);
+    }
+}
+
+int main(void)
+{
+    stdio_init_all();
+    setup_imu_interrupt();
+    setup_motors();
 
     /* start the main thread */
     TaskHandle_t task;

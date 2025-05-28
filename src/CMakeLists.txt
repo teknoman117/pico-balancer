@@ -19,7 +19,7 @@ target_link_libraries(pico-balancer
     pico_cyw43_arch_lwip_sys_freertos
     pico_stdlib
     pico_lwip_mdns
-    hardware_i2c
+    hardware_pwm
     i2cdevlib
     FreeRTOS-Kernel-Heap4 # FreeRTOS kernel and dynamic heap
 )
