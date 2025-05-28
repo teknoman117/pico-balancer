@@ -16,6 +16,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "queue.h"
+#include "semphr.h"
 
 #include "MPU6050_6Axis_MotionApps_V6_12.h"
 
@@ -39,6 +40,21 @@ union vec3 {
     float d[3];
 };
 
+SemaphoreHandle_t imuSem = nullptr;
+
+void imu_irq_handler(void) {
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+
+    if (gpio_get_irq_event_mask(INT_PIN) & GPIO_IRQ_EDGE_FALL) {
+        gpio_acknowledge_irq(INT_PIN, GPIO_IRQ_EDGE_FALL);
+        if (imuSem) {
+            xSemaphoreGiveFromISR(imuSem, &xHigherPriorityTaskWoken);
+        }
+    }
+
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+}
+
 void imu_task(void *queue_) {
     QueueHandle_t queue = static_cast<QueueHandle_t>(queue_);
 
@@ -55,7 +71,8 @@ void imu_task(void *queue_) {
     auto packetSize = mpu.dmpGetFIFOPacketSize();
 
     while (true) {
-        // wait until bytes in fifo are at least one packet
+        // wait until IMU interrupt has been triggered
+        xSemaphoreTake(imuSem, portMAX_DELAY);
         auto fifoCount = mpu.getFIFOCount();
         if ((mpuIntStatus & 0x10) || fifoCount == 1024)  {
             mpu.resetFIFO();
@@ -86,6 +103,7 @@ void imu_task(void *queue_) {
 
 void main_task(__unused void *params) {
     // kick off the mpu thread
+    imuSem = xSemaphoreCreateCounting(1000, 0);
     QueueHandle_t queueIMU = xQueueCreate(10, sizeof(vec3));
     TaskHandle_t taskIMU;
     xTaskCreate(imu_task, "IMUThread", 8192, (void *) queueIMU, TEST_TASK_PRIORITY, &taskIMU);
@@ -175,11 +193,18 @@ int main(void)
     stdio_init_all();
 
     // initialize I2C1 bus for the MPU6050
-    i2c_init(i2c1, 100 * 1000);
+    i2c_init(i2c1, 400 * 1000);
     gpio_set_function(SDA_PIN, GPIO_FUNC_I2C);
     gpio_set_function(SCL_PIN, GPIO_FUNC_I2C);
     gpio_pull_up(SDA_PIN);
     gpio_pull_up(SCL_PIN);
+
+    // subscribe to imu interrupt
+    gpio_init(INT_PIN);
+    gpio_set_input_enabled(INT_PIN, true);
+    gpio_pull_up(INT_PIN);
+    gpio_add_raw_irq_handler(INT_PIN, imu_irq_handler);
+    gpio_set_irq_enabled(INT_PIN, GPIO_IRQ_EDGE_FALL, true);
 
     /* for now, wait for the usb connection */
     //while (!stdio_usb_connected()) {
