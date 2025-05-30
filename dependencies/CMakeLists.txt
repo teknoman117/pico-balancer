@@ -11,6 +11,9 @@ else()
     endif()
 endif()
 
+# Add FreeRTOS kernel path for any dependencies that expect it
+set(FREERTOS_KERNEL_PATH "${CMAKE_CURRENT_LIST_DIR}/FreeRTOS-Kernel")
+
 # Add dma i2c library
 add_subdirectory(pico-i2c-dma)
 
