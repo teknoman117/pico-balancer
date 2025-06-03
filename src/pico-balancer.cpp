@@ -50,6 +50,36 @@ union vec3 {
     float d[3];
 };
 
+using OrientationPacket = vec3;
+
+struct PIDResponsePacket {
+    float P;
+    float I;
+    float D;
+};
+
+struct PIDConfigurationPacket {
+    float Kp;
+    float Ki;
+    float Kd;
+};
+
+enum class MotionPacketType : uint32_t {
+    INVALID = 0,
+    ORIENTATION = 1,
+    PID_RESPONSE = 2,
+    PID_CONFIGURATION = 3,
+};
+
+struct MotionPacket {
+    MotionPacketType type;
+    union {
+        OrientationPacket orientation;
+        PIDResponsePacket pid_response;
+        PIDConfigurationPacket pid_configuration;
+    };
+};
+
 void set_motor_left_speed(int16_t speed);
 void set_motor_right_speed(int16_t speed);
 
@@ -67,6 +97,11 @@ void imu_irq_handler(void) {
 
     portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
+
+// PID constants
+volatile float Kp = 1.f / 5.f;
+volatile float Ki = 0.025f;
+volatile float Kd = 1.1f;
 
 void imu_task(void *queue_) {
     QueueHandle_t queue = static_cast<QueueHandle_t>(queue_);
@@ -86,14 +121,16 @@ void imu_task(void *queue_) {
         vTaskDelete(NULL);
     }
 
+    mpu.setXAccelOffset(-387);
+    mpu.setYAccelOffset(1135);
+    mpu.setZAccelOffset(975);
+    mpu.setXGyroOffset(106);
+    mpu.setYGyroOffset(18);
+    mpu.setZGyroOffset(7);
+
     mpu.setDMPEnabled(true);
     auto mpuIntStatus = mpu.getIntStatus();
     auto packetSize = mpu.dmpGetFIFOPacketSize();
-
-    // PID constants
-    const float Kp = 1.f / 5.f;
-    const float Ki = 0.025f;
-    const float Kd = 1.1f;
 
     // PID state
     float previous_error = NAN;
@@ -133,16 +170,19 @@ void imu_task(void *queue_) {
         euler.roll = euler.roll * 180.f / PI;
 
         // compute angle error
-        float error = euler.pitch - 3.0;
+        float error = euler.pitch /*- 3.0*/;
         if (isnan(previous_error)) {
             previous_error = error;
         }
 
         // update balancing PID controller
+        const float P = Kp * error;
         I += error;
-        float response_PD = (Kp * error) + (Kd * (error - previous_error));
-        float response = response_PD + (Ki * I);
+        const float D = Kd * (error - previous_error);
         previous_error = error;
+
+        float response_PD = P + D;
+        float response = response_PD + (Ki * I);
 
         // backpropagate to solve I-term windup
         if (response > 1.f) {
@@ -167,13 +207,71 @@ void imu_task(void *queue_) {
         set_motor_right_speed((int16_t) response);
 
         // send state to network thread
-        xQueueSend(queue, (void *) &euler, 10 / portTICK_PERIOD_MS);
+        MotionPacket orientation_packet {
+            .type = MotionPacketType::ORIENTATION,
+            .orientation = euler
+        };
+        xQueueSend(queue, (void *) &orientation_packet, 0);
+
+        // send PID packet to network thread
+        MotionPacket pid_packet {
+            .type = MotionPacketType::PID_RESPONSE,
+            .pid_response = {
+                .P = P,
+                .I = I,
+                .D = D
+            }
+        };
+        xQueueSend(queue, (void *) &pid_packet, 0);
     }
+}
+
+void configuration_task(__unused void *params) {
+    // setup udp receive socket for configuration
+    struct sockaddr_in address;
+    address.sin_family = AF_INET;
+    address.sin_port = htons(3000);
+    address.sin_addr.s_addr = htonl(INADDR_ANY);
+    address.sin_len = sizeof address;
+
+    auto sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock == -1) {
+        printf("failed to create a udp socket\n");
+        vTaskDelete(nullptr);
+    }
+
+    auto res = bind(sock, (struct sockaddr*) &address, sizeof address);
+    if (res == -1) {
+        printf("failed to bind configuration socket\n");
+        close(sock);
+        vTaskDelete(nullptr);
+    }
+
+    while (true) {
+        struct MotionPacket packet;
+        res = recv(sock, &packet, sizeof packet, 0);
+        if (res < 0) {
+            printf("recv encountered an error = %d\n", res);
+            continue;
+        }
+
+        switch (packet.type) {
+            case MotionPacketType::PID_CONFIGURATION:
+                Kp = packet.pid_configuration.Kp;
+                Ki = packet.pid_configuration.Ki;
+                Kd = packet.pid_configuration.Kd;
+                break;
+            default:
+                break;
+        }
+    }
+
+    vTaskDelete(nullptr);
 }
 
 void main_task(__unused void *params) {
     // kick off the mpu thread
-    QueueHandle_t queueIMU = xQueueCreate(10, sizeof(vec3));
+    QueueHandle_t queueIMU = xQueueCreate(10, sizeof(MotionPacket));
     xTaskCreate(imu_task, "IMUThread", 8192, (void *) queueIMU, TEST_TASK_PRIORITY, &taskIMU);
 
     // initialize wifi hardware
@@ -231,18 +329,19 @@ void main_task(__unused void *params) {
     }
     printf("\nIP: %s, hostname: %s.local\n", ip4addr_ntoa(netif_ip4_addr(netif_list)), hostname);
 
+    TaskHandle_t taskConfiguration;
+    xTaskCreate(configuration_task, "ConfigurationThread", 8192, nullptr, TEST_TASK_PRIORITY,
+            &taskConfiguration);
+
     while (true) {
         // receive next orientation
-        vec3 orientation;
-        if (xQueueReceive(queueIMU, (void *) &orientation, portMAX_DELAY) != pdPASS) {
+        MotionPacket packet;
+        if (xQueueReceive(queueIMU, (void *) &packet, portMAX_DELAY) != pdPASS) {
             continue;
         }
 
-        // send orientation
-        char msg[64] = {0};
-        int len = snprintf(msg, sizeof msg, "ypr: %f,\t %f,\t %f\n", orientation.yaw,
-                orientation.pitch, orientation.roll);
-        res = send(sock, msg, len, 0);
+        // send packet
+        res = send(sock, &packet, sizeof packet, 0);
         if (res < 0) {
             printf("send encountered an error = %d\n", res);
         }

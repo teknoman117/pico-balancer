@@ -1,3 +1,5 @@
 build
 .venv
 .vscode/cmake-kits.json
+.ipynb_checkpoints
+__pycache__
