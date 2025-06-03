@@ -12,7 +12,9 @@ PACKET_TYPE_PID_RESPONSE = 2
 class PIDResponsePacket(ctypes.Structure):
     _fields_ = [("P", ctypes.c_float),
                 ("I", ctypes.c_float),
-                ("D", ctypes.c_float)]
+                ("D", ctypes.c_float),
+                ("left", ctypes.c_int32),
+                ("right", ctypes.c_int32)]
 
 PACKET_TYPE_PID_CONFIGURATION = 3
 class PIDConfigurationPacket(ctypes.Structure):

@@ -2,6 +2,7 @@
 
 #include "pico/cyw43_arch.h"
 #include "pico/stdlib.h"
+#include "hardware/pio.h"
 #include "hardware/pwm.h"
 
 #include "lwip/ip4_addr.h"
@@ -19,6 +20,7 @@
 #include "semphr.h"
 
 #include "MPU6050_6Axis_MotionApps_V6_12.h"
+#include "quadrature_encoder.pio.h"
 
 #define TEST_TASK_PRIORITY                ( tskIDLE_PRIORITY + 1UL )
 
@@ -35,6 +37,11 @@
 #define MOTOR_RIGHT_B 19
 
 #define MOTOR_PWM_WRAP 5000
+
+#define MOTOR_LEFT_ENCODER_A 14
+#define MOTOR_LEFT_ENCODER_B 15
+#define MOTOR_RIGHT_ENCODER_A 12
+#define MOTOR_RIGHT_ENCODER_B 13
 
 union vec3 {
     struct {
@@ -56,6 +63,8 @@ struct PIDResponsePacket {
     float P;
     float I;
     float D;
+    int32_t left;
+    int32_t right;
 };
 
 struct PIDConfigurationPacket {
@@ -136,6 +145,9 @@ void imu_task(void *queue_) {
     float previous_error = NAN;
     float I = 0.f;
 
+    int32_t previous_left_encoder = 0;
+    int32_t previous_right_encoder = 0;
+
     while (true) {
         auto fifoCount = mpu.getFIFOCount();
         if (fifoCount < packetSize) {
@@ -168,6 +180,12 @@ void imu_task(void *queue_) {
         euler.yaw = euler.yaw * 180.f / PI;
         euler.pitch = euler.pitch * 180.f / PI;
         euler.roll = euler.roll * 180.f / PI;
+
+        // encoder work
+        int32_t left_encoder = quadrature_encoder_get_count_nonblocking(pio0, 0, previous_left_encoder);
+        int32_t right_encoder = quadrature_encoder_get_count_nonblocking(pio0, 1, previous_right_encoder);
+        previous_left_encoder = left_encoder;
+        previous_right_encoder = right_encoder;
 
         // compute angle error
         float error = euler.pitch /*- 3.0*/;
@@ -219,7 +237,9 @@ void imu_task(void *queue_) {
             .pid_response = {
                 .P = P,
                 .I = I,
-                .D = D
+                .D = D,
+                .left = left_encoder,
+                .right = right_encoder
             }
         };
         xQueueSend(queue, (void *) &pid_packet, 0);
@@ -391,6 +411,13 @@ void setup_motors() {
     pwm_set_enabled(pwm_gpio_to_slice_num(MOTOR_RIGHT_PWM), true);
 }
 
+void setup_encoders() {
+    pio_add_program(pio0, &quadrature_encoder_program);
+
+    quadrature_encoder_program_init(pio0, 0, MOTOR_LEFT_ENCODER_A, 0);
+    quadrature_encoder_program_init(pio0, 1, MOTOR_RIGHT_ENCODER_A, 0);
+}
+
 void set_motor_left_speed(int16_t speed) {
     if (speed > 5000) {
         speed = 5000;
@@ -437,6 +464,7 @@ int main(void)
 {
     stdio_init_all();
     setup_imu_interrupt();
+    setup_encoders();
     setup_motors();
 
     /* start the main thread */

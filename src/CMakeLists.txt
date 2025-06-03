@@ -4,6 +4,10 @@ add_executable(pico-balancer
     pico-balancer.cpp
 )
 
+pico_generate_pio_header(pico-balancer
+    ${CMAKE_CURRENT_LIST_DIR}/quadrature_encoder.pio
+)
+
 target_include_directories(pico-balancer PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}>
 )
@@ -20,6 +24,7 @@ target_link_libraries(pico-balancer
     pico_stdlib
     pico_lwip_mdns
     hardware_pwm
+    hardware_pio
     i2cdevlib
     FreeRTOS-Kernel-Heap4 # FreeRTOS kernel and dynamic heap
 )
