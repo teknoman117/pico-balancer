@@ -53,15 +53,15 @@ union vec3 {
 void set_motor_left_speed(int16_t speed);
 void set_motor_right_speed(int16_t speed);
 
-SemaphoreHandle_t imuSem = nullptr;
+TaskHandle_t taskIMU = nullptr;
 
 void imu_irq_handler(void) {
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 
     if (gpio_get_irq_event_mask(INT_PIN) & GPIO_IRQ_EDGE_FALL) {
         gpio_acknowledge_irq(INT_PIN, GPIO_IRQ_EDGE_FALL);
-        if (imuSem) {
-            xSemaphoreGiveFromISR(imuSem, &xHigherPriorityTaskWoken);
+        if (taskIMU) {
+            vTaskNotifyGiveFromISR(taskIMU, &xHigherPriorityTaskWoken);
         }
     }
 
@@ -90,10 +90,24 @@ void imu_task(void *queue_) {
     auto mpuIntStatus = mpu.getIntStatus();
     auto packetSize = mpu.dmpGetFIFOPacketSize();
 
+    // PID constants
+    const float Kp = 1.f / 5.f;
+    const float Ki = 0.025f;
+    const float Kd = 1.1f;
+
+    // PID state
+    float previous_error = NAN;
+    float I = 0.f;
+
     while (true) {
-        // wait until IMU interrupt has been triggered
-        xSemaphoreTake(imuSem, portMAX_DELAY);
         auto fifoCount = mpu.getFIFOCount();
+        if (fifoCount < packetSize) {
+            // wait until IMU interrupt has been triggered
+            ulTaskNotifyTake(pdFALSE, portMAX_DELAY);
+        }
+
+        // check for packets from the IMU
+        fifoCount = mpu.getFIFOCount();
         if ((mpuIntStatus & 0x10) || fifoCount == 1024)  {
             mpu.resetFIFO();
             continue;
@@ -117,15 +131,49 @@ void imu_task(void *queue_) {
         euler.yaw = euler.yaw * 180.f / PI;
         euler.pitch = euler.pitch * 180.f / PI;
         euler.roll = euler.roll * 180.f / PI;
+
+        // compute angle error
+        float error = euler.pitch - 3.0;
+        if (isnan(previous_error)) {
+            previous_error = error;
+        }
+
+        // update balancing PID controller
+        I += error;
+        float response_PD = (Kp * error) + (Kd * (error - previous_error));
+        float response = response_PD + (Ki * I);
+        previous_error = error;
+
+        // backpropagate to solve I-term windup
+        if (response > 1.f) {
+            if (response_PD > 1.f) {
+                I = 0.f;
+            } else {
+                I = (1.f - response_PD) / Ki;
+            }
+            response = 1.f;
+        } else if (response < -1.f) {
+            if (response_PD < -1.f) {
+                I = 0.f;
+            } else {
+                I = (-1.f - response_PD) / Ki;
+            }
+            response = -1.f;
+        }
+
+        // update the motor inputs
+        response *= (float) MOTOR_PWM_WRAP;
+        set_motor_left_speed((int16_t) response);
+        set_motor_right_speed((int16_t) response);
+
+        // send state to network thread
         xQueueSend(queue, (void *) &euler, 10 / portTICK_PERIOD_MS);
     }
 }
 
 void main_task(__unused void *params) {
     // kick off the mpu thread
-    imuSem = xSemaphoreCreateCounting(1000, 0);
     QueueHandle_t queueIMU = xQueueCreate(10, sizeof(vec3));
-    TaskHandle_t taskIMU;
     xTaskCreate(imu_task, "IMUThread", 8192, (void *) queueIMU, TEST_TASK_PRIORITY, &taskIMU);
 
     // initialize wifi hardware
@@ -183,12 +231,6 @@ void main_task(__unused void *params) {
     }
     printf("\nIP: %s, hostname: %s.local\n", ip4addr_ntoa(netif_ip4_addr(netif_list)), hostname);
 
-    // set motors according to tilt
-    const float Kp = 1.f / 5.f;
-    const float Ki = 0.025f;
-    const float Kd = 1.0f;
-    float previous_error = NAN;
-    float sum_error = 0.f;
     while (true) {
         // receive next orientation
         vec3 orientation;
@@ -196,24 +238,10 @@ void main_task(__unused void *params) {
             continue;
         }
 
-        // input error
-        float error = orientation.pitch - 3.0;
-        if (isnan(previous_error)) {
-            previous_error = error;
-        }
-        sum_error += error;
-
-        float response = (Kp * error) + (Ki * sum_error) + (Kd * (error - previous_error));
-        response *= (float) MOTOR_PWM_WRAP;
-        set_motor_left_speed((int16_t) response);
-        set_motor_right_speed((int16_t) response);
-
-        previous_error = error;
-
         // send orientation
         char msg[64] = {0};
-        int len = snprintf(msg, sizeof msg, "ypr: %f,\t %f,\t %f, response: %f\n", orientation.yaw,
-                orientation.pitch, orientation.roll, response);
+        int len = snprintf(msg, sizeof msg, "ypr: %f,\t %f,\t %f\n", orientation.yaw,
+                orientation.pitch, orientation.roll);
         res = send(sock, msg, len, 0);
         if (res < 0) {
             printf("send encountered an error = %d\n", res);
