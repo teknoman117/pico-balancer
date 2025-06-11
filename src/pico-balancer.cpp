@@ -57,14 +57,19 @@ union vec3 {
     float d[3];
 };
 
-using OrientationPacket = vec3;
-
-struct PIDResponsePacket {
+struct StatePacket {
+    uint32_t timestamp;
+    vec3 orientation;
+    float orientation_target;
     float P;
     float I;
     float D;
-    int32_t left;
-    int32_t right;
+    float velocity;
+    float velocity_target;
+    float velocity_error;
+    float vP;
+    float vI;
+    float vD;
 };
 
 struct PIDConfigurationPacket {
@@ -73,19 +78,24 @@ struct PIDConfigurationPacket {
     float Kd;
 };
 
+struct ControlPacket {
+    float x;
+    float y;
+};
+
 enum class MotionPacketType : uint32_t {
     INVALID = 0,
-    ORIENTATION = 1,
-    PID_RESPONSE = 2,
-    PID_CONFIGURATION = 3,
+    STATE = 1,
+    PID_CONFIGURATION = 2,
+    CONTROL = 3,
 };
 
 struct MotionPacket {
     MotionPacketType type;
     union {
-        OrientationPacket orientation;
-        PIDResponsePacket pid_response;
+        StatePacket state;
         PIDConfigurationPacket pid_configuration;
+        ControlPacket control;
     };
 };
 
@@ -111,6 +121,13 @@ void imu_irq_handler(void) {
 volatile float Kp = 1.f / 5.f;
 volatile float Ki = 0.025f;
 volatile float Kd = 1.1f;
+
+// Control targets
+volatile float control_x = 0.0f;
+volatile float control_y = 0.0f;
+
+// Constants Mutex
+SemaphoreHandle_t inputMutex = nullptr;
 
 void imu_task(void *queue_) {
     QueueHandle_t queue = static_cast<QueueHandle_t>(queue_);
@@ -145,9 +162,13 @@ void imu_task(void *queue_) {
     float previous_error = NAN;
     float I = 0.f;
 
+    // control PID state
     int32_t previous_left_encoder = 0;
     int32_t previous_right_encoder = 0;
+    float previous_velocity_error[2] = { 0.f, 0.f };
+    float control = 0.f;
 
+    uint32_t previous_timestamp = xTaskGetTickCount();
     while (true) {
         auto fifoCount = mpu.getFIFOCount();
         if (fifoCount < packetSize) {
@@ -167,6 +188,8 @@ void imu_task(void *queue_) {
         // read the fifo
         uint8_t fifoBuffer[64];
         mpu.getFIFOBytes(fifoBuffer, packetSize);
+        uint32_t timestamp = xTaskGetTickCount();
+        float timestamp_delta = (float) pdTICKS_TO_MS(timestamp - previous_timestamp) / 1000.f;
 
         // convert to euler angles
         Quaternion q;
@@ -184,11 +207,41 @@ void imu_task(void *queue_) {
         // encoder work
         int32_t left_encoder = quadrature_encoder_get_count_nonblocking(pio0, 0, previous_left_encoder);
         int32_t right_encoder = quadrature_encoder_get_count_nonblocking(pio0, 1, previous_right_encoder);
+        int32_t left_encoder_delta = left_encoder - previous_left_encoder;
+        int32_t right_encoder_delta = right_encoder - previous_right_encoder;
         previous_left_encoder = left_encoder;
         previous_right_encoder = right_encoder;
 
+        // take constant lock
+        xSemaphoreTake(inputMutex, portMAX_DELAY);
+
+        // compute control input
+        const float velocity = (float) (left_encoder_delta + right_encoder_delta) / 2.f;
+        const float velocity_target = control_y * 960.f;
+        const float velocity_error = velocity_target - velocity;
+
+        const float velocity_Kp = 0.0200f;
+        const float velocity_Ki = 0.000f;
+        const float velocity_Kd = 0.0200f;
+
+        const float velocity_P = velocity_Kp * (velocity_error - previous_velocity_error[0]);
+        const float velocity_I = velocity_Ki * velocity_error * timestamp_delta;
+        const float velocity_D = velocity_Kd * (velocity_error - 2.f*previous_velocity_error[0] + previous_velocity_error[1]) / timestamp_delta;
+        control += velocity_P + velocity_I + velocity_D;
+
+        if (control > 5.f) {
+            control = 5.f;
+        } else if (control < -5.f) {
+            control = -5.f;
+        }
+
+        previous_velocity_error[1] = previous_velocity_error[0];
+        previous_velocity_error[0] = velocity_error;
+
         // compute angle error
-        float error = euler.pitch /*- 3.0*/;
+        float error = euler.pitch - control;
+        //float error = euler.pitch - (5.f * control_y);
+        //float error = euler.pitch;
         if (isnan(previous_error)) {
             previous_error = error;
         }
@@ -219,30 +272,33 @@ void imu_task(void *queue_) {
             response = -1.f;
         }
 
+        xSemaphoreGive(inputMutex);
+
         // update the motor inputs
-        response *= (float) MOTOR_PWM_WRAP;
-        set_motor_left_speed((int16_t) response);
-        set_motor_right_speed((int16_t) response);
+        float response_left = (response + control_x) * (float) MOTOR_PWM_WRAP;
+        float response_right = (response - control_x) * (float) MOTOR_PWM_WRAP;
+        set_motor_left_speed((int16_t) response_left);
+        set_motor_right_speed((int16_t) response_right);
 
         // send state to network thread
-        MotionPacket orientation_packet {
-            .type = MotionPacketType::ORIENTATION,
-            .orientation = euler
-        };
-        xQueueSend(queue, (void *) &orientation_packet, 0);
-
-        // send PID packet to network thread
-        MotionPacket pid_packet {
-            .type = MotionPacketType::PID_RESPONSE,
-            .pid_response = {
+        MotionPacket state_packet {
+            .type = MotionPacketType::STATE,
+            .state = {
+                .timestamp = timestamp,
+                .orientation = euler,
+                .orientation_target = control,
                 .P = P,
                 .I = I,
                 .D = D,
-                .left = left_encoder,
-                .right = right_encoder
+                .velocity = velocity,
+                .velocity_target = velocity_target,
+                .velocity_error = velocity_error,
+                .vP = velocity_P,
+                .vI = velocity_I,
+                .vD = velocity_D,
             }
         };
-        xQueueSend(queue, (void *) &pid_packet, 0);
+        xQueueSend(queue, (void *) &state_packet, 0);
     }
 }
 
@@ -275,21 +331,31 @@ void configuration_task(__unused void *params) {
             continue;
         }
 
+        xSemaphoreTake(inputMutex, portMAX_DELAY);
         switch (packet.type) {
             case MotionPacketType::PID_CONFIGURATION:
                 Kp = packet.pid_configuration.Kp;
                 Ki = packet.pid_configuration.Ki;
                 Kd = packet.pid_configuration.Kd;
                 break;
+            case MotionPacketType::CONTROL:
+                control_x = packet.control.x;
+                control_y = packet.control.y;
+                break;
             default:
                 break;
         }
+        xSemaphoreGive(inputMutex);
     }
 
     vTaskDelete(nullptr);
 }
 
 void main_task(__unused void *params) {
+    // allocate mutexes
+    inputMutex = xSemaphoreCreateBinary();
+    xSemaphoreGive(inputMutex);
+
     // kick off the mpu thread
     QueueHandle_t queueIMU = xQueueCreate(10, sizeof(MotionPacket));
     xTaskCreate(imu_task, "IMUThread", 8192, (void *) queueIMU, TEST_TASK_PRIORITY, &taskIMU);

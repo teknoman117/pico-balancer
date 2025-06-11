@@ -2,30 +2,38 @@ import ctypes
 
 PACKET_TYPE_UNKNOWN = 0
 
-PACKET_TYPE_ORIENTATION = 1
-class OrientationPacket(ctypes.Structure):
-    _fields_ = [("yaw", ctypes.c_float),
+PACKET_TYPE_STATE = 1
+class StatePacket(ctypes.Structure):
+    _fields_ = [("timestamp", ctypes.c_uint32),
+                ("yaw", ctypes.c_float),
                 ("pitch", ctypes.c_float),
-                ("roll", ctypes.c_float)]
-
-PACKET_TYPE_PID_RESPONSE = 2
-class PIDResponsePacket(ctypes.Structure):
-    _fields_ = [("P", ctypes.c_float),
+                ("roll", ctypes.c_float),
+                ("pitch_target", ctypes.c_float),
+                ("P", ctypes.c_float),
                 ("I", ctypes.c_float),
                 ("D", ctypes.c_float),
-                ("left", ctypes.c_int32),
-                ("right", ctypes.c_int32)]
+                ("velocity", ctypes.c_float),
+                ("velocity_target", ctypes.c_float),
+                ("velocity_error", ctypes.c_float),
+                ("vP", ctypes.c_float),
+                ("vI", ctypes.c_float),
+                ("vD", ctypes.c_float)]
 
-PACKET_TYPE_PID_CONFIGURATION = 3
+PACKET_TYPE_PID_CONFIGURATION = 2
 class PIDConfigurationPacket(ctypes.Structure):
     _fields_ = [("Kp", ctypes.c_float),
                 ("Ki", ctypes.c_float),
                 ("Kd", ctypes.c_float)]
 
+PACKET_TYPE_CONTROL = 3
+class ControlPacket(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_float),
+                ("y", ctypes.c_float)]
+
 class MotionPacketData(ctypes.Union):
-    _fields_ = [("orientation", OrientationPacket),
-                ("pid_response", PIDResponsePacket),
-                ("pid_configuration", PIDConfigurationPacket)]
+    _fields_ = [("state", StatePacket),
+                ("pid_configuration", PIDConfigurationPacket),
+                ("control", ControlPacket)]
 
 class MotionPacket(ctypes.Structure):
     _fields_ = [("type", ctypes.c_uint32),
