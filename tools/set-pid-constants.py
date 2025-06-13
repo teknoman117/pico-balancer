@@ -6,11 +6,7 @@ import argparse
 
 from balancer.types import MotionPacket, PIDConfigurationPacket, PACKET_TYPE_PID_CONFIGURATION
 
-# volatile float Kp = 1.f / 5.f;
-# volatile float Ki = 0.025f;
-# volatile float Kd = 1.1f;
-
-async def main(Kp = 0.2, Ki = 0.025, Kd = 1.1):
+async def main(Kp = 0.1, Ki = 1.0, Kd = 0.01):
     sock = await asyncudp.create_socket(remote_addr=('pico-balancer.local', 3000))
 
     # decode command line parameters
@@ -29,9 +25,9 @@ async def main(Kp = 0.2, Ki = 0.025, Kd = 1.1):
 parser = argparse.ArgumentParser(
                     prog='PID Configuration Setter',
                     description='Updates PicoW Balancer PID Configuration')
-parser.add_argument('-p', '--Kp', default=0.2)
-parser.add_argument('-i', '--Ki', default=0.025)
-parser.add_argument('-d', '--Kd', default=1.1)
+parser.add_argument('-p', '--Kp', default=0.1)
+parser.add_argument('-i', '--Ki', default=1.0)
+parser.add_argument('-d', '--Kd', default=0.01)
 
 args = parser.parse_args()
 asyncio.run(main(Kp=float(args.Kp), Ki=float(args.Ki), Kd=float(args.Kd)))

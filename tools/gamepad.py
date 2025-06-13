@@ -40,7 +40,7 @@ async def main():
                     stick_x = 0
 
             elif event.code == evdev.ecodes.ABS_Y:
-                stick_y = clamp(((255 - event.value) - 128) / 127)
+                stick_y = clamp((event.value - 128) / 127)
                 if abs(stick_y) < 0.05:
                     stick_y = 0
 
@@ -48,9 +48,8 @@ async def main():
         if stick_x is not None and stick_y is not None:
             packet = MotionPacket()
             packet.type = PACKET_TYPE_CONTROL
-            packet.data.control.x = stick_x * 0.25
+            packet.data.control.x = stick_x
             packet.data.control.y = stick_y
             sock.sendto(bytes(packet))
-            print(f'control input = {stick_x}, {stick_y}')
 
 asyncio.run(main())

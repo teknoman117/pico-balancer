@@ -117,10 +117,15 @@ void imu_irq_handler(void) {
     portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
-// PID constants
-volatile float Kp = 1.f / 5.f;
-volatile float Ki = 0.025f;
-volatile float Kd = 1.1f;
+// pitch PID constants
+volatile float Kp = 0.10f;
+volatile float Ki = 1.00f;
+volatile float Kd = 0.01f;
+
+// velocity pid targets
+const float velocity_Kp = 0.650f;
+const float velocity_Ki = 0.0000f;
+const float velocity_Kd = 1.500f;
 
 // Control targets
 volatile float control_x = 0.0f;
@@ -158,15 +163,16 @@ void imu_task(void *queue_) {
     auto mpuIntStatus = mpu.getIntStatus();
     auto packetSize = mpu.dmpGetFIFOPacketSize();
 
-    // PID state
-    float previous_error = NAN;
+    // orientation PID state
+    float previous_error = 0.0f;
     float I = 0.f;
 
-    // control PID state
+    // velocity PID state
     int32_t previous_left_encoder = 0;
     int32_t previous_right_encoder = 0;
-    float previous_velocity_error[2] = { 0.f, 0.f };
-    float control = 0.f;
+    float previous_velocity_error = 0.0f;
+    float velocity_I = 0.f;
+    float velocity = 0.f;
 
     uint32_t previous_timestamp = xTaskGetTickCount();
     while (true) {
@@ -189,7 +195,8 @@ void imu_task(void *queue_) {
         uint8_t fifoBuffer[64];
         mpu.getFIFOBytes(fifoBuffer, packetSize);
         uint32_t timestamp = xTaskGetTickCount();
-        float timestamp_delta = (float) pdTICKS_TO_MS(timestamp - previous_timestamp) / 1000.f;
+        const float timestamp_delta = 0.01f;
+        previous_timestamp = timestamp;
 
         // convert to euler angles
         Quaternion q;
@@ -215,44 +222,47 @@ void imu_task(void *queue_) {
         // take constant lock
         xSemaphoreTake(inputMutex, portMAX_DELAY);
 
-        // compute control input
-        const float velocity = (float) (left_encoder_delta + right_encoder_delta) / 2.f;
-        const float velocity_target = control_y * 960.f;
+        // compute control input (run velocity through a low pass filter)
+        const float velocity_raw = (left_encoder_delta + right_encoder_delta) / 2;
+        const float velocity_alpha = 0.025f;
+        velocity = velocity_alpha * velocity_raw + (1.f - velocity_alpha) * velocity;
+        const float velocity_target = (control_y * timestamp_delta * 1920.f);
         const float velocity_error = velocity_target - velocity;
 
-        const float velocity_Kp = 0.0200f;
-        const float velocity_Ki = 0.000f;
-        const float velocity_Kd = 0.0200f;
+        const float velocity_P = velocity_Kp * velocity_error;
+        velocity_I += (velocity_error * timestamp_delta);
+        const float velocity_D = velocity_Kd * (velocity_error - previous_velocity_error);
+        previous_velocity_error = velocity_error;
 
-        const float velocity_P = velocity_Kp * (velocity_error - previous_velocity_error[0]);
-        const float velocity_I = velocity_Ki * velocity_error * timestamp_delta;
-        const float velocity_D = velocity_Kd * (velocity_error - 2.f*previous_velocity_error[0] + previous_velocity_error[1]) / timestamp_delta;
-        control += velocity_P + velocity_I + velocity_D;
+        const float control_PD = velocity_P + velocity_D;
+        float control = control_PD + (velocity_Ki * velocity_I);
 
-        if (control > 5.f) {
-            control = 5.f;
-        } else if (control < -5.f) {
-            control = -5.f;
+        // backpropagate to solve I-term windup
+        const float control_limit = 3.0f;
+        if (control > control_limit) {
+            if (control_PD > control_limit) {
+                velocity_I = 0.f;
+            } else {
+                velocity_I = (control_limit - control_PD) / velocity_Ki;
+            }
+            control = control_limit;
+        } else if (control < -control_limit) {
+            if (control_PD < -control_limit) {
+                velocity_I = 0.f;
+            } else {
+                velocity_I = (-control_limit - control_PD) / velocity_Ki;
+            }
+            control = -control_limit;
         }
 
-        previous_velocity_error[1] = previous_velocity_error[0];
-        previous_velocity_error[0] = velocity_error;
-
-        // compute angle error
-        float error = euler.pitch - control;
-        //float error = euler.pitch - (5.f * control_y);
-        //float error = euler.pitch;
-        if (isnan(previous_error)) {
-            previous_error = error;
-        }
-
-        // update balancing PID controller
+        // compute tilt angle error
+        const float error = euler.pitch - control;
         const float P = Kp * error;
-        I += error;
-        const float D = Kd * (error - previous_error);
+        I += (error * timestamp_delta);
+        const float D = Kd * (error - previous_error) / timestamp_delta;
         previous_error = error;
 
-        float response_PD = P + D;
+        const float response_PD = P + D;
         float response = response_PD + (Ki * I);
 
         // backpropagate to solve I-term windup
@@ -275,8 +285,8 @@ void imu_task(void *queue_) {
         xSemaphoreGive(inputMutex);
 
         // update the motor inputs
-        float response_left = (response + control_x) * (float) MOTOR_PWM_WRAP;
-        float response_right = (response - control_x) * (float) MOTOR_PWM_WRAP;
+        float response_left = (response - 0.5f * control_x) * (float) MOTOR_PWM_WRAP;
+        float response_right = (response + 0.5f * control_x) * (float) MOTOR_PWM_WRAP;
         set_motor_left_speed((int16_t) response_left);
         set_motor_right_speed((int16_t) response_right);
 
@@ -288,13 +298,13 @@ void imu_task(void *queue_) {
                 .orientation = euler,
                 .orientation_target = control,
                 .P = P,
-                .I = I,
+                .I = Ki * I,
                 .D = D,
                 .velocity = velocity,
                 .velocity_target = velocity_target,
                 .velocity_error = velocity_error,
                 .vP = velocity_P,
-                .vI = velocity_I,
+                .vI = velocity_Ki * velocity_I,
                 .vD = velocity_D,
             }
         };
