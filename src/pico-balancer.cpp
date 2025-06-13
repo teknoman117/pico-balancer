@@ -122,12 +122,12 @@ volatile float Kp = 0.10f;
 volatile float Ki = 1.00f;
 volatile float Kd = 0.01f;
 
-// velocity pid targets
+// velocity pid constants
 const float velocity_Kp = 0.650f;
 const float velocity_Ki = 0.0000f;
 const float velocity_Kd = 1.500f;
 
-// Control targets
+// gamepad inputs
 volatile float control_x = 0.0f;
 volatile float control_y = 0.0f;
 
@@ -198,7 +198,7 @@ void imu_task(void *queue_) {
         const float timestamp_delta = 0.01f;
         previous_timestamp = timestamp;
 
-        // convert to euler angles
+        // convert to euler angles (in degrees)
         Quaternion q;
         VectorFloat gravity;
         vec3 euler;
@@ -206,12 +206,11 @@ void imu_task(void *queue_) {
         mpu.dmpGetGravity(&gravity, &q);
         mpu.dmpGetYawPitchRoll(euler.d, &q, &gravity);
 
-        // convert to decimal and send to networking task
         euler.yaw = euler.yaw * 180.f / PI;
         euler.pitch = euler.pitch * 180.f / PI;
         euler.roll = euler.roll * 180.f / PI;
 
-        // encoder work
+        // get velocity from encoders
         int32_t left_encoder = quadrature_encoder_get_count_nonblocking(pio0, 0, previous_left_encoder);
         int32_t right_encoder = quadrature_encoder_get_count_nonblocking(pio0, 1, previous_right_encoder);
         int32_t left_encoder_delta = left_encoder - previous_left_encoder;
@@ -219,7 +218,7 @@ void imu_task(void *queue_) {
         previous_left_encoder = left_encoder;
         previous_right_encoder = right_encoder;
 
-        // take constant lock
+        // take lock on inputs
         xSemaphoreTake(inputMutex, portMAX_DELAY);
 
         // compute control input (run velocity through a low pass filter)
@@ -237,7 +236,7 @@ void imu_task(void *queue_) {
         const float control_PD = velocity_P + velocity_D;
         float control = control_PD + (velocity_Ki * velocity_I);
 
-        // backpropagate to solve I-term windup
+        // clamp control input to +/- 3 degrees and backpropagate if needed to limit I-term windup
         const float control_limit = 3.0f;
         if (control > control_limit) {
             if (control_PD > control_limit) {
@@ -255,7 +254,7 @@ void imu_task(void *queue_) {
             control = -control_limit;
         }
 
-        // compute tilt angle error
+        // compute motor response to match tilt control input
         const float error = euler.pitch - control;
         const float P = Kp * error;
         I += (error * timestamp_delta);
@@ -265,7 +264,7 @@ void imu_task(void *queue_) {
         const float response_PD = P + D;
         float response = response_PD + (Ki * I);
 
-        // backpropagate to solve I-term windup
+        // clamp motor response to +/- 1.0 and backpropagate if needed to limit I-term windup
         if (response > 1.f) {
             if (response_PD > 1.f) {
                 I = 0.f;
@@ -282,13 +281,14 @@ void imu_task(void *queue_) {
             response = -1.f;
         }
 
-        xSemaphoreGive(inputMutex);
-
-        // update the motor inputs
+        // mix yaw control into motor responses and scale to motor input range
         float response_left = (response - 0.5f * control_x) * (float) MOTOR_PWM_WRAP;
         float response_right = (response + 0.5f * control_x) * (float) MOTOR_PWM_WRAP;
         set_motor_left_speed((int16_t) response_left);
         set_motor_right_speed((int16_t) response_right);
+
+        // release lock on inputs
+        xSemaphoreGive(inputMutex);
 
         // send state to network thread
         MotionPacket state_packet {
@@ -495,10 +495,18 @@ void setup_encoders() {
 }
 
 void set_motor_left_speed(int16_t speed) {
-    if (speed > 5000) {
-        speed = 5000;
-    } else if (speed < -5000) {
-        speed = -5000;
+    // adjust for motor deadzone
+    if (speed > 0) {
+        speed = speed + 50;
+    } else if (speed < 0) {
+        speed = speed - 50;
+    }
+
+    // clamp input to motor pwm range
+    if (speed > MOTOR_PWM_WRAP) {
+        speed = MOTOR_PWM_WRAP;
+    } else if (speed < -MOTOR_PWM_WRAP) {
+        speed = -MOTOR_PWM_WRAP;
     }
 
     if (speed > 0) {
@@ -516,10 +524,18 @@ void set_motor_left_speed(int16_t speed) {
 }
 
 void set_motor_right_speed(int16_t speed) {
-    if (speed > 5000) {
-        speed = 5000;
-    } else if (speed < -5000) {
-        speed = -5000;
+    // adjust for motor deadzone
+    if (speed > 0) {
+        speed = speed + 50;
+    } else if (speed < 0) {
+        speed = speed - 50;
+    }
+
+    // clamp input to motor pwm range
+    if (speed > MOTOR_PWM_WRAP) {
+        speed = MOTOR_PWM_WRAP;
+    } else if (speed < -MOTOR_PWM_WRAP) {
+        speed = -MOTOR_PWM_WRAP;
     }
 
     if (speed > 0) {
