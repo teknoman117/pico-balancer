@@ -27,11 +27,13 @@ public:
 
     ScopedLock(ScopedLock&& lock_)
             : mutex(nullptr) {
-        std::swap(lock_.mutex, mutex);
+        mutex = lock_.mutex;
+        lock_.mutex = nullptr;
     }
 
     ScopedLock& operator=(ScopedLock&& lock_) {
-        std::swap(lock_.mutex, mutex);
+        mutex = lock_.mutex;
+        lock_.mutex = nullptr;
         return *this;
     }
 };

@@ -85,8 +85,6 @@ void imu_task(__unused void *params) {
     auto mpuIntStatus = mpu.getIntStatus();
     auto packetSize = mpu.dmpGetFIFOPacketSize();
 
-    int32_t previous_left_encoder = 0;
-    int32_t previous_right_encoder = 0;
     float velocity = 0.f;
     while (true) {
         auto fifoCount = mpu.getFIFOCount();
