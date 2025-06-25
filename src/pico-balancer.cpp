@@ -163,7 +163,6 @@ void imu_task(__unused void *params) {
     auto mpuIntStatus = mpu.getIntStatus();
     auto packetSize = mpu.dmpGetFIFOPacketSize();
 
-    // control PID state
     int32_t previous_left_encoder = 0;
     int32_t previous_right_encoder = 0;
     float velocity = 0.f;
@@ -189,7 +188,7 @@ void imu_task(__unused void *params) {
         uint32_t timestamp = xTaskGetTickCount();
         const float timestamp_delta = 0.01f;
 
-        // convert to euler angles
+        // convert to euler angles (in degrees)
         Quaternion q;
         VectorFloat gravity;
         vec3 euler;
@@ -197,12 +196,11 @@ void imu_task(__unused void *params) {
         mpu.dmpGetGravity(&gravity, &q);
         mpu.dmpGetYawPitchRoll(euler.d, &q, &gravity);
 
-        // convert to decimal and send to networking task
         euler.yaw = euler.yaw * 180.f / PI;
         euler.pitch = euler.pitch * 180.f / PI;
         euler.roll = euler.roll * 180.f / PI;
 
-        // encoder work
+        // get velocity from encoders
         int32_t left_encoder = quadrature_encoder_get_count_nonblocking(pio0, 0, previous_left_encoder);
         int32_t right_encoder = quadrature_encoder_get_count_nonblocking(pio0, 1, previous_right_encoder);
         int32_t left_encoder_delta = left_encoder - previous_left_encoder;
@@ -210,8 +208,15 @@ void imu_task(__unused void *params) {
         previous_left_encoder = left_encoder;
         previous_right_encoder = right_encoder;
 
-        // compute control input
-        ScopedLock controlLock(input_mutex);
+        // if we've fallen over, turn off the motors
+        if (fabs(euler.pitch) >= 45.f) {
+            set_motor_left_speed(0);
+            set_motor_right_speed(0);
+            continue;
+        }
+
+        // compute tilt angle to achieve target velocity
+        ScopedLock lock(input_mutex);
         float velocity_P, velocity_I, velocity_D;
         const float velocity_current = (float) (left_encoder_delta + right_encoder_delta)
                 / (2.f * timestamp_delta);
@@ -219,20 +224,13 @@ void imu_task(__unused void *params) {
         const float control = velocity_pid.compute(velocity, timestamp_delta,
                 &velocity_P, &velocity_I, &velocity_D);
 
-        // if the tilt is too extreme, disable the motors
-        if (fabs(euler.pitch) >= 45.f) {
-            set_motor_left_speed(0);
-            set_motor_right_speed(0);
-            continue;
-        }
-
-        // update tilt controller
+        // compute motor response to achieve target tilt angle
         tilt_pid.set_setpoint(-3.f * control);
         float tilt_P, tilt_I, tilt_D;
         const float response = tilt_pid.compute(euler.pitch, timestamp_delta,
                 &tilt_P, &tilt_I, &tilt_D);
 
-        // update yaw controller
+        // compute motor response to achieve target yaw angle
         const float yaw_target = yaw_pid.get_setpoint() + yaw_rate * timestamp_delta;
         yaw_pid.set_setpoint(normalize_heading_degrees(yaw_target));
         float yaw_P, yaw_I, yaw_D;
@@ -242,7 +240,7 @@ void imu_task(__unused void *params) {
             return normalize_heading_degrees(measured - target);
         });
 
-        // update the motor inputs
+        // set motors based on PID loops
         float response_left = (response + 0.33f * yaw_response) * (float) MOTOR_PWM_WRAP;
         float response_right = (response - 0.33f * yaw_response) * (float) MOTOR_PWM_WRAP;
         set_motor_left_speed((int16_t) response_left);
