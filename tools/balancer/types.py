@@ -14,21 +14,26 @@ class StatePacket(ctypes.Structure):
                 ("D", ctypes.c_float),
                 ("velocity", ctypes.c_float),
                 ("velocity_target", ctypes.c_float),
-                ("velocity_error", ctypes.c_float),
                 ("vP", ctypes.c_float),
                 ("vI", ctypes.c_float),
-                ("vD", ctypes.c_float)]
+                ("vD", ctypes.c_float),
+                ("yaw_target", ctypes.c_float),
+                ("yP", ctypes.c_float),
+                ("yI", ctypes.c_float),
+                ("yD", ctypes.c_float)]
 
-PACKET_TYPE_PID_CONFIGURATION = 2
+PACKET_TYPE_CONTROL = 2
+class ControlPacket(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_float),
+                ("y", ctypes.c_float)]
+
+PACKET_TYPE_PID_CONFIGURATION_TILT = 3
+PACKET_TYPE_PID_CONFIGURATION_VELOCITY = 4
+PACKET_TYPE_PID_CONFIGURATION_YAW = 5
 class PIDConfigurationPacket(ctypes.Structure):
     _fields_ = [("Kp", ctypes.c_float),
                 ("Ki", ctypes.c_float),
                 ("Kd", ctypes.c_float)]
-
-PACKET_TYPE_CONTROL = 3
-class ControlPacket(ctypes.Structure):
-    _fields_ = [("x", ctypes.c_float),
-                ("y", ctypes.c_float)]
 
 class MotionPacketData(ctypes.Union):
     _fields_ = [("state", StatePacket),
