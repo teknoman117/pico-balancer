@@ -20,8 +20,9 @@
 #include "semphr.h"
 
 #include "MPU6050_6Axis_MotionApps_V6_12.h"
-#include "quadrature_encoder.pio.h"
 
+#include "motors.hpp"
+#include "packets.hpp"
 #include "pid.hpp"
 #include "utils.hpp"
 
@@ -30,85 +31,6 @@
 #define INT_PIN 9
 #define SDA_PIN 10
 #define SCL_PIN 11
-
-#define MOTOR_LEFT_PWM 16
-#define MOTOR_LEFT_A 18
-#define MOTOR_LEFT_B 17
-
-#define MOTOR_RIGHT_PWM 21
-#define MOTOR_RIGHT_A 20
-#define MOTOR_RIGHT_B 19
-
-#define MOTOR_PWM_WRAP 5000
-
-#define MOTOR_LEFT_ENCODER_A 14
-#define MOTOR_LEFT_ENCODER_B 15
-#define MOTOR_RIGHT_ENCODER_A 12
-#define MOTOR_RIGHT_ENCODER_B 13
-
-union vec3 {
-    struct {
-        float z;
-        float y;
-        float x;
-    };
-    struct {
-        float yaw;
-        float pitch;
-        float roll;
-    };
-    float d[3];
-};
-
-struct StatePacket {
-    uint32_t timestamp;
-    vec3 orientation;
-    float orientation_target;
-    float P;
-    float I;
-    float D;
-    float velocity;
-    float velocity_target;
-    float vP;
-    float vI;
-    float vD;
-    float yaw_target;
-    float yP;
-    float yI;
-    float yD;
-};
-
-struct PIDConfigurationPacket {
-    float Kp;
-    float Ki;
-    float Kd;
-};
-
-struct ControlPacket {
-    float x;
-    float y;
-};
-
-enum class MotionPacketType : uint32_t {
-    INVALID = 0,
-    STATE = 1,
-    CONTROL = 2,
-    PID_CONFIGURATION_TILT = 3,
-    PID_CONFIGURATION_VELOCITY = 4,
-    PID_CONFIGURATION_YAW = 5,
-};
-
-struct MotionPacket {
-    MotionPacketType type;
-    union {
-        StatePacket state;
-        PIDConfigurationPacket pid_configuration;
-        ControlPacket control;
-    };
-};
-
-void set_motor_left_speed(int16_t speed);
-void set_motor_right_speed(int16_t speed);
 
 // Tilt PID Controller
 constexpr float Kp = 0.100f;
@@ -200,16 +122,8 @@ void imu_task(__unused void *params) {
         euler.pitch = euler.pitch * 180.f / PI;
         euler.roll = euler.roll * 180.f / PI;
 
-        // get velocity from encoders
-        int32_t left_encoder = quadrature_encoder_get_count_nonblocking(pio0, 0, previous_left_encoder);
-        int32_t right_encoder = quadrature_encoder_get_count_nonblocking(pio0, 1, previous_right_encoder);
-        int32_t left_encoder_delta = left_encoder - previous_left_encoder;
-        int32_t right_encoder_delta = right_encoder - previous_right_encoder;
-        previous_left_encoder = left_encoder;
-        previous_right_encoder = right_encoder;
-
         // if we've fallen over, turn off the motors
-        if (fabs(euler.pitch) >= 45.f) {
+        if (fabs(euler.pitch) >= 30.f) {
             set_motor_left_speed(0);
             set_motor_right_speed(0);
             continue;
@@ -218,8 +132,7 @@ void imu_task(__unused void *params) {
         // compute tilt angle to achieve target velocity
         ScopedLock lock(input_mutex);
         float velocity_P, velocity_I, velocity_D;
-        const float velocity_current = (float) (left_encoder_delta + right_encoder_delta)
-                / (2.f * timestamp_delta);
+        const float velocity_current = (float) get_motor_velocity() / timestamp_delta;
         velocity = (velocity_Ka * velocity_current) + (1.f - velocity_Ka) * velocity;
         const float control = velocity_pid.compute(velocity, timestamp_delta,
                 &velocity_P, &velocity_I, &velocity_D);
@@ -240,11 +153,9 @@ void imu_task(__unused void *params) {
             return normalize_heading_degrees(measured - target);
         });
 
-        // set motors based on PID loops
-        float response_left = (response + 0.33f * yaw_response) * (float) MOTOR_PWM_WRAP;
-        float response_right = (response - 0.33f * yaw_response) * (float) MOTOR_PWM_WRAP;
-        set_motor_left_speed((int16_t) response_left);
-        set_motor_right_speed((int16_t) response_right);
+        // mix tilt and yaw responses
+        set_motor_left_speed(response + 0.33f * yaw_response);
+        set_motor_right_speed(response - 0.33f * yaw_response);
 
         // send state to network thread
         MotionPacket state_packet {
@@ -423,82 +334,6 @@ void setup_imu_interrupt() {
         portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
     });
     gpio_set_irq_enabled(INT_PIN, GPIO_IRQ_EDGE_FALL, true);
-}
-
-void setup_motors() {
-    // set up the motor GPIOs and PWM
-    gpio_init(MOTOR_LEFT_A);
-    gpio_set_dir(MOTOR_LEFT_A, GPIO_OUT);
-    gpio_put(MOTOR_LEFT_A, false);
-
-    gpio_init(MOTOR_LEFT_B);
-    gpio_set_dir(MOTOR_LEFT_B, GPIO_OUT);
-    gpio_put(MOTOR_LEFT_B, false);
-
-    gpio_init(MOTOR_RIGHT_A);
-    gpio_set_dir(MOTOR_RIGHT_A, GPIO_OUT);
-    gpio_put(MOTOR_RIGHT_A, false);
-
-    gpio_init(MOTOR_RIGHT_B);
-    gpio_set_dir(MOTOR_RIGHT_B, GPIO_OUT);
-    gpio_put(MOTOR_RIGHT_B, false);
-
-    gpio_set_function(MOTOR_LEFT_PWM, GPIO_FUNC_PWM);
-    pwm_set_wrap(pwm_gpio_to_slice_num(MOTOR_LEFT_PWM), MOTOR_PWM_WRAP);
-    pwm_set_enabled(pwm_gpio_to_slice_num(MOTOR_LEFT_PWM), true);
-
-    gpio_set_function(MOTOR_RIGHT_PWM, GPIO_FUNC_PWM);
-    pwm_set_wrap(pwm_gpio_to_slice_num(MOTOR_RIGHT_PWM), MOTOR_PWM_WRAP);
-    pwm_set_enabled(pwm_gpio_to_slice_num(MOTOR_RIGHT_PWM), true);
-}
-
-void setup_encoders() {
-    pio_add_program(pio0, &quadrature_encoder_program);
-
-    quadrature_encoder_program_init(pio0, 0, MOTOR_LEFT_ENCODER_A, 0);
-    quadrature_encoder_program_init(pio0, 1, MOTOR_RIGHT_ENCODER_A, 0);
-}
-
-void set_motor_left_speed(int16_t speed) {
-    if (speed > 5000) {
-        speed = 5000;
-    } else if (speed < -5000) {
-        speed = -5000;
-    }
-
-    if (speed > 0) {
-        gpio_put(MOTOR_LEFT_A, false);
-        gpio_put(MOTOR_LEFT_B, true);
-        pwm_set_gpio_level(MOTOR_LEFT_PWM, speed);
-    } else if (speed < 0) {
-        gpio_put(MOTOR_LEFT_A, true);
-        gpio_put(MOTOR_LEFT_B, false);
-        pwm_set_gpio_level(MOTOR_LEFT_PWM, -speed);
-    } else {
-        gpio_put(MOTOR_LEFT_A, false);
-        gpio_put(MOTOR_LEFT_B, false);
-    }
-}
-
-void set_motor_right_speed(int16_t speed) {
-    if (speed > 5000) {
-        speed = 5000;
-    } else if (speed < -5000) {
-        speed = -5000;
-    }
-
-    if (speed > 0) {
-        gpio_put(MOTOR_RIGHT_A, true);
-        gpio_put(MOTOR_RIGHT_B, false);
-        pwm_set_gpio_level(MOTOR_RIGHT_PWM, speed);
-    } else if (speed < 0) {
-        gpio_put(MOTOR_RIGHT_A, false);
-        gpio_put(MOTOR_RIGHT_B, true);
-        pwm_set_gpio_level(MOTOR_RIGHT_PWM, -speed);
-    } else {
-        gpio_put(MOTOR_RIGHT_A, false);
-        gpio_put(MOTOR_RIGHT_B, false);
-    }
 }
 
 int main(void)
